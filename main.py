@@ -7,119 +7,93 @@ import plotly.graph_objects as go
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import accuracy_score
-import io
+
+REQUIRED_COLUMNS = [
+    'age', 
+    'restingbp', 
+    'cholesterol', 
+    'fastingbs>120', 
+    'exerciseangina', 
+    'heartdisease'
+]
 
 @st.cache_data
 def load_data(uploaded_file=None):
     if uploaded_file is not None:
         try:
             df = pd.read_excel(uploaded_file)
+            df.columns = df.columns.str.lower()
             
-            df = clean_data(df)
-            
-            required_columns = ['age', 'sex', 'trestbps', 'chol', 'fbs', 'exang', 'target']
-            for col in required_columns:
-                if col not in df.columns:
-                    st.error(f"Required column '{col}' not found in uploaded data")
-                    return None
-            
-            return df
+            missing_cols = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+            if missing_cols:
+                st.error(f"Missing required columns: {', '.join(missing_cols)}")
+                return None
+                
+            return clean_data(df)
             
         except Exception as e:
-            st.error(f"Error reading Excel file: {str(e)}")
+            st.error(f"Error reading file: {str(e)}")
             return None
     else:
-        url = "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data"
-        columns = ['age', 'sex', 'cp', 'trestbps', 'chol', 'fbs', 'restecg', 
-                   'thalach', 'exang', 'oldpeak', 'slope', 'ca', 'thal', 'target']
-        df = pd.read_csv(url, names=columns, na_values='?')
-        df['target'] = df['target'].apply(lambda x: 1 if x > 0 else 0)
-        df = clean_data(df)
-        return df
+        st.info("Using sample data since no file was uploaded")
+        data = {
+            'age': [52, 38, 45, 60],
+            'restingbp': [125, 138, 110, 140],
+            'cholesterol': [240, 182, 210, 318],
+            'fastingbs>120': ["No", "Yes", "No", "Yes"],
+            'exerciseangina': ["No", "Yes", "No", "Yes"],
+            'heartdisease': [0, 1, 0, 1]
+        }
+        return pd.DataFrame(data)
 
 def clean_data(df):
-    """Clean and standardize the dataset"""
-    df = df.dropna()
-    
-    df.columns = df.columns.str.lower()
-    
-    if 'target' in df.columns:
-        df['target'] = df['target'].apply(lambda x: 1 if x > 0 else 0)
-    
-    numeric_cols = ['age', 'trestbps', 'chol', 'thalach', 'oldpeak']
+    """Clean and standardize the dataset with NA/NaN handling"""
+    numeric_cols = ['age', 'restingbp', 'cholesterol']
     for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[col] = df[col].replace([np.inf, -np.inf], np.nan)
     
-    df = df.dropna()
+    if 'fastingbs>120' in df.columns:
+        df['fastingbs>120'] = df['fastingbs>120'].apply(
+            lambda x: 1 if str(x).lower() in ['yes', '1', 'true'] else (
+                0 if str(x).lower() in ['no', '0', 'false'] else np.nan
+            )
+        )
     
-    return df
+    if 'exerciseangina' in df.columns:
+        df['exerciseangina'] = df['exerciseangina'].apply(
+            lambda x: 1 if str(x).lower() in ['yes', '1', 'true'] else (
+                0 if str(x).lower() in ['no', '0', 'false'] else np.nan
+            )
+        )
+    
+    if 'heartdisease' in df.columns:
+        df['heartdisease'] = pd.to_numeric(df['heartdisease'], errors='coerce')
+        df['heartdisease'] = df['heartdisease'].replace([np.inf, -np.inf], np.nan)
+        df['heartdisease'] = df['heartdisease'].clip(0, 1)
+    
+    df_cleaned = df.dropna()
+    
+    if len(df_cleaned) < len(df):
+        st.warning(f"Removed {len(df) - len(df_cleaned)} rows with missing/invalid values")
+    
+    return df_cleaned
 
-def preprocess_inputs(df, age, sex, trestbps, chol, fbs, exang, thalach=150, oldpeak=1.0):
-   
-    sex = 1 if sex == "Male" else 0
-    fbs = 1 if fbs == "Yes" else 0
-    exang = 1 if exang == "Yes" else 0
-    
-    input_data = {
+def preprocess_inputs(age, restingbp, cholesterol, fastingbs, exerciseangina):
+    """Prepare user inputs for prediction"""
+    return pd.DataFrame([{
         'age': age,
-        'sex': sex,
-        'cp': df['cp'].median() if 'cp' in df.columns else 0,
-        'trestbps': trestbps,
-        'chol': chol,
-        'fbs': fbs,
-        'restecg': df['restecg'].median() if 'restecg' in df.columns else 0,
-        'thalach': thalach,
-        'exang': exang,
-        'oldpeak': oldpeak,
-        'slope': df['slope'].median() if 'slope' in df.columns else 0,
-        'ca': df['ca'].median() if 'ca' in df.columns else 0,
-        'thal': df['thal'].median() if 'thal' in df.columns else 0
-    }
-    
-    return pd.DataFrame([input_data])
-
-def plot_feature_importance(model, features):
-    importance = model.coef_[0] if hasattr(model, 'coef_') else model.feature_importances_
-    fig = px.bar(x=features, y=importance, 
-                 labels={'x':'Features', 'y':'Importance'},
-                 title='Feature Importance for Heart Disease Prediction')
-    fig.update_layout(template='plotly_dark')
-    return fig
-
-def plot_radar_chart(patient_data, healthy_ranges):
-    categories = ['Age', 'BP', 'Cholesterol', 'Max HR', 'ST Depression']
-    
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatterpolar(
-        r=patient_data,
-        theta=categories,
-        fill='toself',
-        name='Your Metrics'
-    ))
-    
-    fig.add_trace(go.Scatterpolar(
-        r=healthy_ranges,
-        theta=categories,
-        fill='toself',
-        name='Healthy Ranges'
-    ))
-    
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True)),
-        showlegend=True,
-        title="Your Health Metrics vs. Healthy Ranges"
-    )
-    
-    return fig
+        'restingbp': restingbp,
+        'cholesterol': cholesterol,
+        'fastingbs>120': 1 if fastingbs == "Yes" else 0,
+        'exerciseangina': 1 if exerciseangina == "Yes" else 0
+    }])
 
 def plot_risk_gauge(probability):
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
-        value = probability*100,
+        value = probability * 100,
         domain = {'x': [0, 1], 'y': [0, 1]},
         title = {'text': "Heart Disease Risk (%)"},
         gauge = {
@@ -131,119 +105,96 @@ def plot_risk_gauge(probability):
             'threshold': {
                 'line': {'color': "black", 'width': 4},
                 'thickness': 0.75,
-                'value': probability*100}}))
-    
+                'value': probability * 100
+            }
+        }
+    ))
     return fig
 
-def plot_age_risk_distribution(df):
-    fig = px.scatter(df, x='age', y='target', color='sex',
-                     trendline="lowess",
-                     title="Age vs. Heart Disease Risk",
-                     labels={'age': 'Age', 'target': 'Disease Presence', 'sex': 'Gender'},
-                     color_discrete_map={0: 'pink', 1: 'blue'})
-    fig.update_traces(marker=dict(size=10, opacity=0.6))
-    fig.update_layout(plot_bgcolor='rgba(0,0,0,0)')
-    return fig
-
-def show_recommendations(probability, age, chol, bp):
-    st.subheader("Personalized Recommendations")
-    
+def show_recommendations(probability, age, cholesterol):
+    st.subheader("Recommendations")
     if probability < 0.3:
-        st.success("Your heart disease risk is low. Maintain your healthy habits!")
+        st.success("Low risk detected. Maintain healthy habits!")
     elif probability < 0.7:
-        st.warning("Your heart disease risk is moderate. Consider these improvements:")
-    else:
-        st.error("Your heart disease risk is high. Please consult a doctor and consider these changes:")
-    
-    if probability >= 0.3:
-        if bp > 130:
-            st.write("- Work on lowering your blood pressure through diet and exercise")
-        if chol > 200:
-            st.write("- Reduce cholesterol through dietary changes (less saturated fat)")
+        st.warning("Moderate risk detected. Consider:")
+        st.write("- Cholesterol management (current: {} mg/dL)".format(cholesterol))
         if age > 45:
-            st.write("- Regular cardiovascular exercise is especially important as you age")
-        st.write("- Quit smoking if you currently smoke")
-        st.write("- Manage stress through meditation or relaxation techniques")
+            st.write("- Regular cardiovascular checkups")
+    else:
+        st.error("High risk detected. Please consult a doctor immediately.")
+        st.write("- Urgent cholesterol management needed (current: {} mg/dL)".format(cholesterol))
+        st.write("- Comprehensive cardiac evaluation recommended")
 
 def main():
-    st.set_page_config(page_title="Heart Disease Risk Predictor", layout="wide")
-    
+    st.set_page_config(page_title="Heart Disease Predictor", layout="wide")
     st.title("Heart Disease Risk Predictor")
-    st.write("This tool assesses your risk of heart disease based on key health metrics.")
     
-    with st.expander("Upload Custom Dataset (Excel)"):
-        uploaded_file = st.file_uploader("Choose an Excel file", type=['xlsx', 'xls'])
-        if uploaded_file is not None:
-            st.success("File uploaded successfully!")
+    # File upload
+    with st.expander("Upload Data (Excel with required columns)"):
+        uploaded_file = st.file_uploader("Upload Excel file", type=['xlsx'])
+        st.write("""
+        Required columns:
+        - Age (years)
+        - RestingBP (mm Hg)
+        - Cholesterol (mg/dL)
+        - FastingBS>120 (Yes/No)
+        - ExerciseAngina (Yes/No)
+        - HeartDisease (0/1)
+        """)
     
+    # Load data
     df = load_data(uploaded_file)
     
     if df is not None:
-        X = df.drop('target', axis=1)
-        y = df['target']
+        # Prepare data
+        X = df[['age', 'restingbp', 'cholesterol', 'fastingbs>120', 'exerciseangina']]
+        y = df['heartdisease']
         
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Train model
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        lr = LogisticRegression(max_iter=1000)
-        lr.fit(X_train_scaled, y_train)
+        model = LogisticRegression(max_iter=1000)
+        model.fit(X_train_scaled, y_train)
         
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            with st.form("user_input"):
-                st.header("Your Health Metrics")
-                age = st.slider("Age", 20, 80, 45)
-                sex = st.selectbox("Gender", ["Male", "Female"])
-                trestbps = st.slider("Resting Blood Pressure (mm Hg)", 90, 200, 120)
-                chol = st.slider("Cholesterol (mg/dl)", 100, 600, 200)
-                fbs = st.selectbox("Fasting Blood Sugar > 120 mg/dl", ["No", "Yes"])
-                exang = st.selectbox("Exercise Induced Angina", ["No", "Yes"])
-                thalach = st.slider("Maximum Heart Rate Achieved", 60, 220, 150)
-                oldpeak = st.slider("ST Depression Induced by Exercise", 0.0, 6.2, 1.0)
+        # User input form
+        with st.form("prediction_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                age = st.slider("Age (years)", 20, 100, 45)
+                restingbp = st.slider("Resting Blood Pressure (mm Hg)", 80, 200, 120)
                 
-                submitted = st.form_submit_button("Calculate Risk")
+            with col2:
+                cholesterol = st.slider("Cholesterol (mg/dL)", 100, 600, 200)
+                fastingbs = st.selectbox("Fasting Blood Sugar > 120 mg/dL", ["No", "Yes"])
+                exerciseangina = st.selectbox("Exercise Induced Angina", ["No", "Yes"])
+            
+            submitted = st.form_submit_button("Calculate Risk")
         
         if submitted:
-            input_df = preprocess_inputs(df, age, sex, trestbps, chol, fbs, exang, thalach, oldpeak)
+            # Make prediction
+            input_df = preprocess_inputs(age, restingbp, cholesterol, fastingbs, exerciseangina)
             input_scaled = scaler.transform(input_df)
-            proba = lr.predict_proba(input_scaled)[0][1]
+            probability = model.predict_proba(input_scaled)[0][1]
             
-            with col2:
-                st.plotly_chart(plot_risk_gauge(proba), use_container_width=True)
-                
-                show_recommendations(proba, age, chol, trestbps)
-                
-                st.plotly_chart(plot_feature_importance(lr, X.columns), use_container_width=True)
+            # Show results
+            st.plotly_chart(plot_risk_gauge(probability), use_container_width=True)
+            show_recommendations(probability, age, cholesterol)
             
-            st.subheader("Health Insights")
-            col3, col4 = st.columns(2)
-            
-            with col3:
-                patient_metrics = [age, trestbps, chol, thalach, oldpeak]
-                healthy_ranges = [40, 120, 200, 175, 0.5]  
-                st.plotly_chart(plot_radar_chart(patient_metrics, healthy_ranges), use_container_width=True)
-            
-            with col4:
-                st.plotly_chart(plot_age_risk_distribution(df), use_container_width=True)
-        
-        with st.expander("About This Tool"):
-            st.write("""
-            **Model Information:**
-            - Algorithm: Logistic Regression
-            - Accuracy: {:.2f}% (on test data)
-            - Dataset: {} records
-            
-            **Healthy Ranges:**
-            - Blood Pressure: <120/80 mm Hg
-            - Cholesterol: <200 mg/dL
-            - Fasting Blood Sugar: <100 mg/dL
-            
-            **Note:** This tool provides risk estimates, not medical diagnoses. 
-            Always consult a healthcare professional for medical advice.
-            """.format(accuracy_score(y_test, lr.predict(X_test_scaled)) * 100, len(df)))
+            # Show model info
+            with st.expander("Model Information"):
+                st.write(f"Accuracy: {accuracy_score(y_test, model.predict(X_test_scaled)):.2%}")
+                st.write("Features used:")
+                st.write("- Age")
+                st.write("- Resting Blood Pressure")
+                st.write("- Cholesterol")
+                st.write("- Fasting Blood Sugar >120 mg/dL")
+                st.write("- Exercise Induced Angina")
 
 if __name__ == "__main__":
     main()
